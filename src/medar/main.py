@@ -1,6 +1,4 @@
-from tokenizers.tools import EncodingVisualizer
-from transformers import XLMTokenizer, AutoModel, AutoTokenizer
+import os.path as osp
 
-tokenizer  = AutoTokenizer.from_pretrained("bert-base-uncased")
-viz = EncodingVisualizer(tokenizer._tokenizer) # Change here
-viz(text="I am a boy")
+here = osp.dirname(osp.abspath(__file__)) 
+data_base_path = osp.join(here, '../..', 'data')
