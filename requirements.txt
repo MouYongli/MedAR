@@ -1,0 +1,7 @@
+transformers
+datasets
+sentencepiece
+protobuf
+
+pandas
+matplotlib
