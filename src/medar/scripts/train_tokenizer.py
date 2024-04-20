@@ -43,9 +43,9 @@ tokenizer.train(files=["train.txt", "val.txt", "test.txt"], trainer=trainer)
 
 my_tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer)
 
-my_tokenizer.save_pretrained("medal_small_tokenizer")
+my_tokenizer.save_pretrained("../medal_small_tokenizer")
 
-loaded_tokenizer = AutoTokenizer.from_pretrained("medal_small_tokenizer")
+loaded_tokenizer = AutoTokenizer.from_pretrained("../medal_small_tokenizer")
 
 vis  = EncodingVisualizer(loaded_tokenizer._tokenizer)
 a = vis(text = context, default_to_notebook = False)

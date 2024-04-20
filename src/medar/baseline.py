@@ -1,25 +1,28 @@
 from datasets import load_dataset
-from transformers import DataCollatorForSeq2Seq, Seq2SeqTrainer, Seq2SeqTrainingArguments, AutoTokenizer, BertForMaskedLM, TrainingArguments, Trainer, AutoModelForSeq2SeqLM
+from transformers import DataCollatorForSeq2Seq, Seq2SeqTrainer, Seq2SeqTrainingArguments, AutoTokenizer, TrainingArguments, Trainer, AutoModelForSeq2SeqLM
+from transformers import EncoderDecoderModel
 from tokenizers import Tokenizer, models
-from tokenizers.pre_tokenizers import Whitespace
-from tokenizers.trainers import BpeTrainer
 from tokenizers.processors import TemplateProcessing
 import torch
 import numpy as np
 import nltk
 import datasets
 from torch.utils.data import DataLoader
-nltk.download('punkt', quiet=True)
-metric = datasets.load_metric("rouge")
+from sentence_transformers import SentenceTransformer, util
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-#print('Using device:', device)
-checkpoint = "google-t5/t5-small"
-model = AutoModelForSeq2SeqLM.from_pretrained(checkpoint)
+checkpoint = "FacebookAI/roberta-base"
+
+#model = RobertaForCausalLM.from_pretrained(checkpoint, config=config)
+model = EncoderDecoderModel.from_encoder_decoder_pretrained(checkpoint, checkpoint)
 model.to(device)
+
 dataset = load_dataset("medal")
 loaded_tokenizer = AutoTokenizer.from_pretrained("medal_small_tokenizer")
 loaded_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+model.config.decoder_start_token_id = 1
+model.config.eos_token_id = 2
+model.config.pad_token_id = 3
 
 def tokenize_function(example):
     tokenized_batch = loaded_tokenizer(example["masked_text"], example["abbr"], truncation='only_first', padding='max_length', max_length=512)
@@ -72,22 +75,17 @@ def mask_make(example):
 
 def compute_metrics(eval_pred):
     predictions, labels = eval_pred
-    # Decode generated summaries into text
     decoded_preds = loaded_tokenizer.batch_decode(predictions, skip_special_tokens=True)
-    # Replace -100 in the labels as we can't decode them
     labels = np.where(labels != -100, labels, loaded_tokenizer.pad_token_id)
-    # Decode reference summaries into text
     decoded_labels = loaded_tokenizer.batch_decode(labels, skip_special_tokens=True)
-    # ROUGE expects a newline after each sentence
-    decoded_preds = ["\n".join(nltk.sent_tokenize(pred.strip())) for pred in decoded_preds]
-    decoded_labels = ["\n".join(nltk.sent_tokenize(label.strip())) for label in decoded_labels]
-    # Compute ROUGE scores
-    result = metric.compute(
-        predictions=decoded_preds, references=decoded_labels, use_stemmer=True
-    )
-    # Extract the median scores
-    result = {key: value.mid.fmeasure * 100 for key, value in result.items()}
-    return {k: round(v, 4) for k, v in result.items()}
+    sentence_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+    embedding_1= sentence_model.encode(decoded_preds, convert_to_tensor=True)
+    embedding_2 = sentence_model.encode(decoded_labels, convert_to_tensor=True)
+    results = util.pytorch_cos_sim(embedding_1, embedding_2)
+    
+    return {
+        'similarity': torch.mean(results)
+    }
 
 loaded_tokenizer.post_processor = TemplateProcessing(
     single="[CLS] $A [SEP]",
@@ -104,9 +102,6 @@ small_test_dataset = dataset["test"].shuffle(seed=42).select(range(100))
 
 small_train = mask_make(small_train_dataset)
 small_test = mask_make(small_test_dataset)
-#print(small_train.column_names) #['abstract_id', 'text', 'location', 'label', 'abbr']
-#encoding = loaded_tokenizer.encode(small_train[0]['text'], small_train[0]['abbr'])
-#print(encoding.tokens)
 
 
 tokenized_datasets = small_train.map(tokenize_function, batched=True, remove_columns=small_train.column_names)
@@ -116,31 +111,6 @@ columns = ['input_ids', 'labels', 'input_ids','attention_mask']
 tokenized_datasets.set_format(type='torch', columns=columns)
 tokenized_test_datasets.set_format(type='torch', columns=columns)
 
-#['abstract_id', 'text', 'location', 'label', 'input_ids', 'token_type_ids', 'attention_mask']"
-#tokenized_datasets = tokenized_datasets.remove_columns(['abstract_id', 'text', 'location', 'abbr', 'masked_text'])
-#print(tokenized_datasets.column_names)
-#tokenized_datasets = tokenized_datasets.rename_column("label_id", "label")
-#tokenized_datasets = tokenized_datasets.rename_column("label", "labels")
-#tokenized_datasets.set_format("torch")
-#print(tokenized_datasets.column_names) ['labels', 'input_ids', 'token_type_ids', 'attention_mask']
-#tokenized_test_datasets = tokenized_test_datasets.remove_columns(['abstract_id', 'text', 'location', 'abbr', 'masked_text'])
-#tokenized_test_datasets = tokenized_test_datasets.rename_column("label_id", "label")
-#tokenized_test_datasets = tokenized_test_datasets.rename_column("label", "labels")
-#tokenized_test_datasets.set_format("torch")
-
-'''test = small_train[1]
-inputs = loaded_tokenizer(test["masked_text"], test["abbr"], return_tensors="pt").to(device)
-#print(inputs)
-with torch.no_grad():
-    logits = model(**inputs).logits
-# retrieve index of [MASK]
-#print(inputs.input_ids)
-#print(loaded_tokenizer.mask_token_id)
-#loaded_tokenizer.mask_token_id = 4
-#mask_token_index = (inputs.input_ids == 4)[0].nonzero(as_tuple=True)[0]
-#predicted_token_id = logits[0, mask_token_index].argmax(axis=-1)
-print(loaded_tokenizer.decode(predicted_token_id))'''
-
 train_dataloader = DataLoader(
     tokenized_datasets, shuffle=True, batch_size=8, collate_fn=data_collator
 )
@@ -149,7 +119,7 @@ eval_dataloader = DataLoader(
 )
 
 training_args = Seq2SeqTrainingArguments(
-    output_dir="bert_filling_model",
+    output_dir="saved_model",
     evaluation_strategy="epoch",
     learning_rate=2e-5,
     per_device_train_batch_size=16,
