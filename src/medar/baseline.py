@@ -10,6 +10,7 @@ import pandas
 from datasets import Dataset
 from sentence_transformers import SentenceTransformer, util
 import argparse
+import csv
 
 loaded_tokenizer = AutoTokenizer.from_pretrained('medal_small_tokenizer')
 
@@ -62,7 +63,7 @@ def mask_make(example):
     return example
 
 
-def compute_metrics(eval_pred):
+def compute_metrics_train(eval_pred):
     predictions, labels = eval_pred
     decoded_preds = loaded_tokenizer.batch_decode(predictions, skip_special_tokens=True)
     labels = np.where(labels != -100, labels, loaded_tokenizer.pad_token_id)
@@ -84,7 +85,6 @@ def main(args):
     model = EncoderDecoderModel.from_encoder_decoder_pretrained(checkpoint, checkpoint)
     model.to(device)
 
-    
     loaded_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     model.config.decoder_start_token_id = 1
     model.config.eos_token_id = 2
@@ -150,18 +150,72 @@ def main(args):
         train_dataset=tokenized_datasets,
         eval_dataset=tokenized_test_datasets,
         data_collator=data_collator,
-        compute_metrics=compute_metrics,
+        compute_metrics=compute_metrics_train,
     )
 
     trainer.train()
     model_to_save = trainer.model.module if hasattr(trainer.model, 'module') else trainer.model  # Take care of distributed/parallel training
     model_to_save.save_pretrained(args.output_dir)
 
+def evaluate(args):
+    checkpoint = args.checkpoint
+    model = EncoderDecoderModel.from_encoder_decoder_pretrained(checkpoint, checkpoint)
+    loaded_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    model.config.decoder_start_token_id = 1
+    model.config.eos_token_id = 2
+    model.config.pad_token_id = 3
+    loaded_tokenizer.post_processor = TemplateProcessing(
+        single="[CLS] $A [SEP]",
+        pair="[CLS] $A [SEP] $B:1 [SEP]:1",
+        special_tokens=[
+            ("[CLS]", 1),
+            ("[SEP]", 2),
+        ],
+    )
+    test_data = pandas.read_csv('../../../../llm-research/MeDAL/pretrain_subset/test.csv')[:10]
+    data_test = mask_make(test_data)
+    test_dataset = Dataset.from_pandas(data_test).shuffle(args.seed)
+    tokenized_test_datasets = test_dataset.map(tokenize_function, batched=True, remove_columns=test_dataset.column_names)
+    columns = ['input_ids', 'labels', 'input_ids','attention_mask'] 
+    tokenized_test_datasets.set_format(type='torch', columns=columns)
+
+    data_collator = DataCollatorForSeq2Seq(tokenizer=loaded_tokenizer, model=checkpoint)
+
+    test_args = Seq2SeqTrainingArguments(
+        output_dir = 'output',
+        do_train = False,
+        do_predict = True,
+        per_device_eval_batch_size = 1,   
+        predict_with_generate=True,
+        dataloader_drop_last = False    
+    )
+
+    trainer = Seq2SeqTrainer(
+        model=model,
+        data_collator=data_collator,
+        args=test_args
+    )
+
+    raw_pred, _, _ = trainer.predict(tokenized_test_datasets)
+    decoded_preds = loaded_tokenizer.batch_decode(raw_pred, skip_special_tokens=True)
+    #print(decoded_preds)
+    #print(test_dataset['LABEL'])
+    result = np.stack((test_dataset['LABEL'], decoded_preds), axis=1)
+    #print(result)
+    fields = ['Label', 'Prediction'] 
+    with open('result', 'w') as f:
+        write = csv.writer(f)
+        write.writerow(fields)
+        write.writerows(result)
+
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', default='FacebookAI/roberta-base')
-    parser.add_argument('--output_dir', default='output/train')
+    parser.add_argument('--output_dir', default='saved_model')
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--seed', default=42, type=int)
     args = parser.parse_args()
-    main(args)
+    #main(args)
+    evaluate(args)
