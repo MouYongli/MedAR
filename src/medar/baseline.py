@@ -12,7 +12,17 @@ from sentence_transformers import SentenceTransformer, util
 import argparse
 import csv
 
-loaded_tokenizer = AutoTokenizer.from_pretrained('medal_small_tokenizer')
+loaded_tokenizer = AutoTokenizer.from_pretrained('medal_WP_tokenizer')
+
+def fix_all_seeds(seed):
+    np.random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+fix_all_seeds(2021)
 
 def tokenize_function(example):
     tokenized_batch = loaded_tokenizer(example["MASKED_TEXT"], example["ABBR"], truncation='only_first', padding='max_length', max_length=512)
@@ -22,7 +32,7 @@ def tokenize_function(example):
     with loaded_tokenizer.as_target_tokenizer():
         #print(example["LABEL"])
         label = example["LABEL"]
-        target_encodings = loaded_tokenizer(label, max_length=10, truncation=True)
+        target_encodings = loaded_tokenizer(label, max_length=10, padding='max_length')
         
     #print(target_encodings)
     
@@ -100,8 +110,8 @@ def main(args):
         ],
     )
 
-    train_data = pandas.read_csv('../../../../llm-research/MeDAL/pretrain_subset/train.csv')[:1000]
-    test_data = pandas.read_csv('../../../../llm-research/MeDAL/pretrain_subset/test.csv')[:1000]
+    train_data = pandas.read_csv('../../../../llm-research/MeDAL/pretrain_subset/train.csv')
+    test_data = pandas.read_csv('../../../../llm-research/MeDAL/pretrain_subset/test.csv')[:100]
     #small_train_dataset = dataset["train"].shuffle(seed=42).select(range(1000))
     #small_val_dataset = dataset["validation"].shuffle(seed=42).select(range(1000))
     #small_test_dataset = dataset["test"].shuffle(seed=42).select(range(100))
@@ -117,7 +127,7 @@ def main(args):
     tokenized_datasets = train_dataset.map(tokenize_function, batched=True, remove_columns=train_dataset.column_names)
     tokenized_test_datasets = test_dataset.map(tokenize_function, batched=True, remove_columns=test_dataset.column_names)
     data_collator = DataCollatorForSeq2Seq(tokenizer=loaded_tokenizer, model=checkpoint)
-    columns = ['input_ids', 'labels', 'input_ids','attention_mask'] 
+    columns = ['input_ids', 'labels', 'attention_mask'] 
     tokenized_datasets.set_format(type='torch', columns=columns)
     tokenized_test_datasets.set_format(type='torch', columns=columns)
 
@@ -172,11 +182,11 @@ def evaluate(args):
             ("[SEP]", 2),
         ],
     )
-    test_data = pandas.read_csv('../../../../llm-research/MeDAL/pretrain_subset/test.csv')[:10]
+    test_data = pandas.read_csv('../../../../llm-research/MeDAL/pretrain_subset/test.csv')[:20]
     data_test = mask_make(test_data)
     test_dataset = Dataset.from_pandas(data_test).shuffle(args.seed)
     tokenized_test_datasets = test_dataset.map(tokenize_function, batched=True, remove_columns=test_dataset.column_names)
-    columns = ['input_ids', 'labels', 'input_ids','attention_mask'] 
+    columns = ['input_ids', 'labels', 'attention_mask'] 
     tokenized_test_datasets.set_format(type='torch', columns=columns)
 
     data_collator = DataCollatorForSeq2Seq(tokenizer=loaded_tokenizer, model=checkpoint)
@@ -196,14 +206,23 @@ def evaluate(args):
         args=test_args
     )
 
-    raw_pred, _, _ = trainer.predict(tokenized_test_datasets)
-    decoded_preds = loaded_tokenizer.batch_decode(raw_pred, skip_special_tokens=True)
+    #raw_pred, _, _ = trainer.predict(tokenized_test_datasets) #model.generate()
+    #decoded_preds = loaded_tokenizer.batch_decode(raw_pred, skip_special_tokens=True)
     #print(decoded_preds)
     #print(test_dataset['LABEL'])
-    result = np.stack((test_dataset['LABEL'], decoded_preds), axis=1)
+    #result = np.stack((test_dataset['LABEL'], decoded_preds), axis=1)
     #print(result)
+
+    model_generate_outputs = []
+    for i, idx in enumerate(tokenized_test_datasets['input_ids']):
+        inputs = idx.unsqueeze(0).to(args.device)
+        pred = model.generate(inputs, max_new_tokens=10, temperature=1)
+        x = loaded_tokenizer.decode(pred.squeeze(0), skip_special_tokens=True)
+        model_generate_outputs.append(x)
+
+    result = np.stack((test_dataset['LABEL'], model_generate_outputs), axis=1)
     fields = ['Label', 'Prediction'] 
-    with open('result', 'w') as f:
+    with open('result_generate', 'w') as f:
         write = csv.writer(f)
         write.writerow(fields)
         write.writerows(result)
@@ -213,7 +232,7 @@ def evaluate(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', default='FacebookAI/roberta-base')
-    parser.add_argument('--output_dir', default='saved_model')
+    parser.add_argument('--output_dir', default='saved_model_roberta')
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--seed', default=42, type=int)
     args = parser.parse_args()
